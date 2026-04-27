@@ -1,0 +1,10 @@
+--- a/chaos-app/config/app.yml
++++ b/chaos-app/config/app.yml
+@@ -9,8 +9,8 @@ app:
+ # Memory leak scenario
+ cache:
+-  eviction_enabled: false     # CHAOS_PARAM (memory) — break: false, fix: true
+-  max_size_mb: 0              # CHAOS_PARAM (memory) — break: 0 (unlimited), fix: 50
++  eviction_enabled: true      # CHAOS_PARAM (memory) — break: false, fix: true
++  max_size_mb: 50             # CHAOS_PARAM (memory) — break: 0 (unlimited), fix: 50
+   ttl_seconds: 60

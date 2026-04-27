@@ -1,0 +1,95 @@
+name: Deploy Chaos App Config
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'chaos-app/config/**'
+      - 'test-infra/terraform.tfvars'
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1: Deploy application config changes to VM
+  # Triggered by changes to chaos-app/config/*.yml
+  # ---------------------------------------------------------------------------
+  deploy-app-config:
+    name: Deploy Config to VM
+    runs-on: ubuntu-latest
+    if: |
+      contains(join(github.event.commits.*.modified, ' '), 'chaos-app/config/')
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VM_SSH_PRIVATE_KEY }}" > ~/.ssh/chaos_key
+          chmod 600 ~/.ssh/chaos_key
+          ssh-keyscan -H "${{ secrets.VM_PUBLIC_IP }}" >> ~/.ssh/known_hosts
+
+      - name: Copy config files to VM
+        run: |
+          scp -i ~/.ssh/chaos_key \
+            chaos-app/config/db.yml \
+            chaos-app/config/app.yml \
+            chaos-app/config/services.yml \
+            azureuser@${{ secrets.VM_PUBLIC_IP }}:~/chaos-app/config/
+
+      - name: Reload app config (restart app container)
+        run: |
+          ssh -i ~/.ssh/chaos_key azureuser@${{ secrets.VM_PUBLIC_IP }} \
+            "cd ~/chaos-app && docker-compose restart app && \
+             sleep 5 && \
+             curl -s -X POST http://localhost:8080/admin/reload-config"
+
+      - name: Log deploy summary
+        run: |
+          echo "✅ Config deployed to VM ${{ secrets.VM_PUBLIC_IP }}"
+          echo "📦 Commit: ${{ github.event.head_commit.message }}"
+          echo "👤 Author: ${{ github.event.head_commit.author.name }}"
+          echo "🕐 Time:   $(date -u)"
+
+  # ---------------------------------------------------------------------------
+  # Job 2: Apply Terraform NSG mutation
+  # Triggered by changes to test-infra/terraform.tfvars (network_partition)
+  # ---------------------------------------------------------------------------
+  deploy-infra:
+    name: Apply Terraform NSG Change
+    runs-on: ubuntu-latest
+    if: |
+      contains(join(github.event.commits.*.modified, ' '), 'test-infra/terraform.tfvars')
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.7"
+
+      - name: Terraform Init
+        working-directory: test-infra
+        env:
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: terraform init
+
+      - name: Terraform Apply
+        working-directory: test-infra
+        env:
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: terraform apply -auto-approve
+
+      - name: Log NSG change
+        run: |
+          echo "🔒 NSG rule applied"
+          echo "📦 Commit: ${{ github.event.head_commit.message }}"
+          echo "👤 Author: ${{ github.event.head_commit.author.name }}"

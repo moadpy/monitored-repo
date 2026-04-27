@@ -1,0 +1,13 @@
+# Downstream Services Configuration
+# CHAOS SIGNATURE: cascade_failure
+
+downstream:
+  payment_gateway_url: "http://downstream-service:8080/health"  # CHAOS_PARAM — break: http://dead-host:9999/health
+  order_processor_url: "http://downstream-service:8080/health"
+  timeout_s: 2
+  retry_attempts: 3
+
+circuit_breaker:
+  enabled: true               # CHAOS_PARAM — break: false, fix: true
+  failure_threshold: 5
+  recovery_timeout_s: 30

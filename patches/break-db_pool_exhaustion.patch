@@ -1,0 +1,11 @@
+--- a/chaos-app/config/db.yml
++++ b/chaos-app/config/db.yml
+@@ -5,7 +5,7 @@ database:
+   port: 5432
+   name: chaosdb
+   user: chaos
+   password: chaospass
+-  max_pool_size: 100        # CHAOS_PARAM — break: 10, fix: 100
++  max_pool_size: 10         # CHAOS_PARAM — break: 10, fix: 100
+   connection_timeout_s: 5
+   idle_timeout_s: 30

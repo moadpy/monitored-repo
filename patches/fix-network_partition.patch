@@ -1,0 +1,5 @@
+--- a/test-infra/terraform.tfvars
++++ b/test-infra/terraform.tfvars
+@@ -1,4 +1,4 @@
+-nsg_block_outbound = true
++nsg_block_outbound = false

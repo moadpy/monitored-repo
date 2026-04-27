@@ -1,0 +1,91 @@
+#!/bin/bash
+# VM Bootstrap Script
+# Runs on first boot via cloud-init (custom_data in Terraform)
+# Installs: Docker, docker-compose, Python3, chaos-app dependencies
+
+set -euo pipefail
+LOG="/var/log/chaos-bootstrap.log"
+exec > >(tee -a "$LOG") 2>&1
+
+echo "=== RCA Chaos App Bootstrap === $(date -u)"
+
+# ---------------------------------------------------------------------------
+# 1. System updates
+# ---------------------------------------------------------------------------
+apt-get update -y
+apt-get upgrade -y
+
+# ---------------------------------------------------------------------------
+# 2. Install Docker
+# ---------------------------------------------------------------------------
+curl -fsSL https://get.docker.com | sh
+usermod -aG docker azureuser
+systemctl enable docker
+systemctl start docker
+
+# ---------------------------------------------------------------------------
+# 3. Install docker-compose v2
+# ---------------------------------------------------------------------------
+apt-get install -y docker-compose-plugin
+ln -sf /usr/libexec/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose
+
+# ---------------------------------------------------------------------------
+# 4. Python3 + pip
+# ---------------------------------------------------------------------------
+apt-get install -y python3 python3-pip python3-venv
+
+# ---------------------------------------------------------------------------
+# 5. stress-ng (used for direct CPU/memory stress if needed as fallback)
+# ---------------------------------------------------------------------------
+apt-get install -y stress-ng
+
+# ---------------------------------------------------------------------------
+# 6. Azure CLI (for az vm restart fallback in cascade scenario)
+# ---------------------------------------------------------------------------
+curl -sL https://aka.ms/InstallAzureCLIDeb | bash
+
+# ---------------------------------------------------------------------------
+# 7. Clone monitored-repo and start the chaos app
+# ---------------------------------------------------------------------------
+# NOTE: Replace GITHUB_REPO_URL with your actual repo URL
+REPO_URL="${GITHUB_REPO_URL:-https://github.com/YOUR_ORG/monitored-repo.git}"
+
+if [ -d /home/azureuser/chaos-app ]; then
+    echo "Repo already cloned — pulling latest"
+    cd /home/azureuser/monitored-repo
+    git pull
+else
+    echo "Cloning repo: $REPO_URL"
+    git clone "$REPO_URL" /home/azureuser/monitored-repo
+fi
+
+chown -R azureuser:azureuser /home/azureuser/monitored-repo
+
+# ---------------------------------------------------------------------------
+# 8. Create .env for metrics-emitter
+# ---------------------------------------------------------------------------
+cat > /home/azureuser/monitored-repo/chaos-app/.env << 'EOF'
+# Azure Monitor ingestion (filled in after Terraform apply)
+AZURE_DCE_ENDPOINT=
+AZURE_DCR_IMMUTABLE_ID=
+AZURE_DCR_STREAM_NAME=Custom-AppMetrics_CL
+AZURE_CLIENT_ID=
+AZURE_CLIENT_SECRET=
+AZURE_TENANT_ID=
+SERVICE_NAME=payment-api
+APP_URL=http://localhost:8080
+LOAD_RPS=50
+EOF
+
+chown azureuser:azureuser /home/azureuser/monitored-repo/chaos-app/.env
+
+# ---------------------------------------------------------------------------
+# 9. Start docker-compose as azureuser
+# ---------------------------------------------------------------------------
+sudo -u azureuser bash -c "
+    cd /home/azureuser/monitored-repo/chaos-app
+    docker-compose up -d --build
+"
+
+echo "=== Bootstrap complete === $(date -u)"
+echo "App running at http://\$(curl -s ifconfig.me):8080"

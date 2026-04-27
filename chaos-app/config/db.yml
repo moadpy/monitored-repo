@@ -1,0 +1,13 @@
+# DB Configuration
+# CHAOS SIGNATURE: db_pool_exhaustion
+# BREAK: set max_pool_size to 10
+# FIX:   set max_pool_size to 100
+database:
+  host: localhost
+  port: 5432
+  name: chaosdb
+  user: chaos
+  password: chaospass
+  max_pool_size: 100        # CHAOS_PARAM — break: 10, fix: 100
+  connection_timeout_s: 5
+  idle_timeout_s: 30

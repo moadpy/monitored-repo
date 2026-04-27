@@ -1,0 +1,103 @@
+version: "3.9"
+
+services:
+  # ---------------------------------------------------------------------------
+  # The monitored microservice (payment-api simulation)
+  # ---------------------------------------------------------------------------
+  app:
+    build: .
+    container_name: payment-api
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config:/app/config:ro   # Config files mounted — hot-swappable
+    environment:
+      - APP_URL=http://localhost:8080
+    depends_on:
+      - postgres
+      - downstream-service
+    command: >
+      uvicorn app:app
+        --host 0.0.0.0
+        --port 8080
+        --workers 4
+        --log-level info
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL — real DB for db_pool_exhaustion scenario
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres-chaos
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: chaosdb
+      POSTGRES_USER: chaos
+      POSTGRES_PASSWORD: chaospass
+      # Limit max_connections so pool exhaustion is fast
+      POSTGRES_MAX_CONNECTIONS: "20"
+    command: >
+      postgres
+        -c max_connections=20
+        -c shared_buffers=64MB
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chaos -d chaosdb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Downstream service — nginx for cascade_failure scenario
+  # When the config points to this container, requests succeed.
+  # When config points to dead-host:9999, cascade failure occurs.
+  # ---------------------------------------------------------------------------
+  downstream-service:
+    image: nginx:1.25-alpine
+    container_name: downstream-service
+    restart: unless-stopped
+    ports:
+      - "8081:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # Load generator — steady traffic so config changes have observable impact
+  # ---------------------------------------------------------------------------
+  load-generator:
+    build: .
+    container_name: load-generator
+    restart: unless-stopped
+    environment:
+      - APP_URL=http://app:8080
+      - LOAD_RPS=50
+    command: python3 load_generator.py
+    depends_on:
+      - app
+
+  # ---------------------------------------------------------------------------
+  # Metrics emitter — pushes custom metrics to Azure Monitor
+  # ---------------------------------------------------------------------------
+  metrics-emitter:
+    build: .
+    container_name: metrics-emitter
+    restart: unless-stopped
+    environment:
+      - APP_URL=http://app:8080
+      - SERVICE_NAME=payment-api
+      - POLL_INTERVAL_S=30
+      - EMIT_INTERVAL_S=60
+      - AZURE_DCE_ENDPOINT=${AZURE_DCE_ENDPOINT}
+      - AZURE_DCR_IMMUTABLE_ID=${AZURE_DCR_IMMUTABLE_ID}
+      - AZURE_DCR_STREAM_NAME=${AZURE_DCR_STREAM_NAME}
+      - AZURE_CLIENT_ID=${AZURE_CLIENT_ID}
+      - AZURE_CLIENT_SECRET=${AZURE_CLIENT_SECRET}
+      - AZURE_TENANT_ID=${AZURE_TENANT_ID}
+    command: python3 metrics_emitter.py
+    depends_on:
+      - app

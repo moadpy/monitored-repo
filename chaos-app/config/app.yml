@@ -1,0 +1,19 @@
+# Application Configuration
+# CHAOS SIGNATURES: memory_leak_progressive, cpu_saturation_burst
+
+app:
+  name: payment-api
+  port: 8080
+  worker_threads: 4           # CHAOS_PARAM (cpu) — break: 1, fix: 4
+  request_timeout_s: 10
+
+# Memory leak scenario
+cache:
+  eviction_enabled: true      # CHAOS_PARAM (memory) — break: false, fix: true
+  max_size_mb: 50             # CHAOS_PARAM (memory) — break: 0 (unlimited), fix: 50
+  ttl_seconds: 60
+
+# CPU saturation scenario
+validation:
+  enable_heavy_validation: false   # CHAOS_PARAM (cpu) — break: true, fix: false
+  regex_complexity: low            # CHAOS_PARAM (cpu) — break: high, fix: low
