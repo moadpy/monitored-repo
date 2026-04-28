@@ -48,7 +48,7 @@ curl -sL https://aka.ms/InstallAzureCLIDeb | bash
 # 7. Clone monitored-repo and start the chaos app
 # ---------------------------------------------------------------------------
 # NOTE: Replace GITHUB_REPO_URL with your actual repo URL
-REPO_URL="${GITHUB_REPO_URL:-https://github.com/YOUR_ORG/monitored-repo.git}"
+REPO_URL="${GITHUB_REPO_URL:-https://github.com/moadpy/monitored-repo.git}"
 
 if [ -d /home/azureuser/chaos-app ]; then
     echo "Repo already cloned — pulling latest"

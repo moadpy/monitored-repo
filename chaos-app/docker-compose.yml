@@ -60,8 +60,10 @@ services:
     restart: unless-stopped
     ports:
       - "8081:8080"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1:8080/health || exit 1"]
       interval: 10s
       timeout: 3s
       retries: 3

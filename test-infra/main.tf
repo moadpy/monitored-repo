@@ -177,7 +177,16 @@ resource "azurerm_linux_virtual_machine" "vm" {
     type = "SystemAssigned"
   }
 
-  custom_data = base64encode(file("scripts/bootstrap.sh"))
+  # This will only CREATE the file on the VM. It will NOT run the installation.
+  custom_data = base64encode(<<-EOF
+    #!/bin/bash
+    cat << 'INNER_EOF' > /home/azureuser/bootstrap.sh
+    ${file("scripts/bootstrap.sh")}
+    INNER_EOF
+    chmod +x /home/azureuser/bootstrap.sh
+    chown azureuser:azureuser /home/azureuser/bootstrap.sh
+  EOF
+  )
 }
 
 # ---------------------------------------------------------------------------
