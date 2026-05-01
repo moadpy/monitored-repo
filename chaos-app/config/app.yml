@@ -4,7 +4,6 @@
 app:
   name: payment-api
   port: 8080
-  worker_threads: 4           # CHAOS_PARAM (cpu) — break: 1, fix: 4
   request_timeout_s: 10
 
 # Memory leak scenario
@@ -16,4 +15,4 @@ cache:
 # CPU saturation scenario
 validation:
   enable_heavy_validation: false   # CHAOS_PARAM (cpu) — break: true, fix: false
-  regex_complexity: low            # CHAOS_PARAM (cpu) — break: high, fix: low
+  regex_complexity: low     # CHAOS_PARAM (cpu) — break: high, fix: low

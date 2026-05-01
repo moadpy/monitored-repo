@@ -4,12 +4,18 @@ terraform {
       source  = "hashicorp/azurerm"
       version = "~> 4.0"
     }
+    azapi = {
+      source  = "Azure/azapi"
+      version = "~> 1.13"
+    }
   }
 }
 
 provider "azurerm" {
   features {}
 }
+
+provider "azapi" {}
 
 # ---------------------------------------------------------------------------
 # Variables
@@ -32,6 +38,13 @@ variable "webhook_url" {
   description = "URL of the RCA backend webhook — POST /api/incident/new"
   type        = string
   default     = ""
+}
+
+locals {
+  service_name                   = "payment-api"
+  app_metrics_table_name         = "AppMetricsRaw_CL"
+  app_metrics_stream_name        = "Custom-AppMetricsRaw"
+  app_metrics_output_stream_name = "Custom-AppMetricsRaw_CL"
 }
 
 # ---------------------------------------------------------------------------
@@ -158,7 +171,7 @@ resource "azurerm_linux_virtual_machine" "vm" {
 
   admin_ssh_key {
     username   = "azureuser"
-    public_key = file("~/.ssh/id_rsa.pub")
+    public_key = file(pathexpand("~/.ssh/id_rsa.pub"))
   }
 
   os_disk {
@@ -177,16 +190,12 @@ resource "azurerm_linux_virtual_machine" "vm" {
     type = "SystemAssigned"
   }
 
-  # This will only CREATE the file on the VM. It will NOT run the installation.
-  custom_data = base64encode(<<-EOF
-    #!/bin/bash
-    cat << 'INNER_EOF' > /home/azureuser/bootstrap.sh
-    ${file("scripts/bootstrap.sh")}
-    INNER_EOF
-    chmod +x /home/azureuser/bootstrap.sh
-    chown azureuser:azureuser /home/azureuser/bootstrap.sh
-  EOF
-  )
+  custom_data = base64encode(templatefile("${path.module}/scripts/bootstrap.sh.tftpl", {
+    azure_dce_endpoint     = azurerm_monitor_data_collection_endpoint.app_metrics.logs_ingestion_endpoint
+    azure_dcr_immutable_id = azurerm_monitor_data_collection_rule.app_metrics.immutable_id
+    azure_dcr_stream_name  = local.app_metrics_stream_name
+    service_name           = local.service_name
+  }))
 }
 
 # ---------------------------------------------------------------------------
@@ -240,6 +249,175 @@ resource "azurerm_monitor_data_collection_rule_association" "dcra" {
   target_resource_id      = azurerm_linux_virtual_machine.vm.id
   data_collection_rule_id = azurerm_monitor_data_collection_rule.dcr.id
   depends_on              = [azurerm_virtual_machine_extension.ama]
+}
+
+# ---------------------------------------------------------------------------
+# Custom log ingestion for application metrics
+# ---------------------------------------------------------------------------
+resource "azapi_resource" "app_metrics_table" {
+  type      = "Microsoft.OperationalInsights/workspaces/tables@2022-10-01"
+  name      = local.app_metrics_table_name
+  parent_id = azurerm_log_analytics_workspace.law.id
+
+  body = jsonencode({
+    properties = {
+      plan                 = "Analytics"
+      retentionInDays      = azurerm_log_analytics_workspace.law.retention_in_days
+      totalRetentionInDays = azurerm_log_analytics_workspace.law.retention_in_days
+      schema = {
+        name = local.app_metrics_table_name
+        columns = [
+          { name = "TimeGenerated", type = "datetime" },
+          { name = "ServiceName", type = "string" },
+          { name = "WindowSeconds", type = "int" },
+          { name = "RequestCount", type = "int" },
+          { name = "ErrorCount", type = "int" },
+          { name = "Http5xxRatePct", type = "real" },
+          { name = "RequestLatencyP99Ms", type = "real" },
+          { name = "DbConnPoolWaitMs", type = "real" },
+          { name = "CacheSizeMb", type = "real" },
+          { name = "CircuitOpen", type = "boolean" },
+          { name = "FailureCount", type = "int" },
+        ]
+      }
+    }
+  })
+}
+
+resource "azurerm_monitor_data_collection_endpoint" "app_metrics" {
+  name                = "dce-rca-app-metrics"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+}
+
+resource "azurerm_monitor_data_collection_rule" "app_metrics" {
+  name                        = "dcr-rca-app-metrics"
+  location                    = azurerm_resource_group.rg.location
+  resource_group_name         = azurerm_resource_group.rg.name
+  data_collection_endpoint_id = azurerm_monitor_data_collection_endpoint.app_metrics.id
+
+  destinations {
+    log_analytics {
+      workspace_resource_id = azurerm_log_analytics_workspace.law.id
+      name                  = "law-destination"
+    }
+  }
+
+  stream_declaration {
+    stream_name = local.app_metrics_stream_name
+
+    column {
+      name = "TimeGenerated"
+      type = "datetime"
+    }
+
+    column {
+      name = "ServiceName"
+      type = "string"
+    }
+
+    column {
+      name = "WindowSeconds"
+      type = "int"
+    }
+
+    column {
+      name = "RequestCount"
+      type = "int"
+    }
+
+    column {
+      name = "ErrorCount"
+      type = "int"
+    }
+
+    column {
+      name = "Http5xxRatePct"
+      type = "real"
+    }
+
+    column {
+      name = "RequestLatencyP99Ms"
+      type = "real"
+    }
+
+    column {
+      name = "DbConnPoolWaitMs"
+      type = "real"
+    }
+
+    column {
+      name = "CacheSizeMb"
+      type = "real"
+    }
+
+    column {
+      name = "CircuitOpen"
+      type = "boolean"
+    }
+
+    column {
+      name = "FailureCount"
+      type = "int"
+    }
+  }
+
+  data_flow {
+    streams       = [local.app_metrics_stream_name]
+    destinations  = ["law-destination"]
+    output_stream = local.app_metrics_output_stream_name
+    transform_kql = "source"
+  }
+
+  depends_on = [azapi_resource.app_metrics_table]
+}
+
+resource "azurerm_role_assignment" "vm_can_publish_app_metrics" {
+  scope                = azurerm_monitor_data_collection_rule.app_metrics.id
+  role_definition_name = "Monitoring Metrics Publisher"
+  principal_id         = azurerm_linux_virtual_machine.vm.identity[0].principal_id
+}
+
+resource "azurerm_log_analytics_saved_search" "rca_metric_snapshot" {
+  name                       = "rca-metric-snapshot"
+  log_analytics_workspace_id = azurerm_log_analytics_workspace.law.id
+  category                   = "RCA Functions"
+  display_name               = "rca_metric_snapshot"
+  function_alias             = "rca_metric_snapshot"
+  function_parameters        = "serviceName:string, alertTime:datetime"
+  query                      = <<-KQL
+    let windowStart = alertTime - 5m;
+    let serviceMatches = serviceName == "${local.service_name}";
+    let cpuAvg = toscalar(
+        Perf
+        | where TimeGenerated between (windowStart .. alertTime)
+        | where _ResourceId == "${azurerm_linux_virtual_machine.vm.id}"
+        | where CounterPath == "\\Processor Information(_Total)\\% Processor Time"
+        | summarize avg(CounterValue)
+    );
+    let memoryAvg = toscalar(
+        Perf
+        | where TimeGenerated between (windowStart .. alertTime)
+        | where _ResourceId == "${azurerm_linux_virtual_machine.vm.id}"
+        | where CounterPath == "\\Memory\\% Committed Bytes In Use"
+        | summarize avg(CounterValue)
+    );
+    let customRows = materialize(
+        AppMetricsRaw_CL
+        | where TimeGenerated between (windowStart .. alertTime)
+        | where ServiceName == serviceName
+    );
+    print
+        service_name = serviceName,
+        alert_timestamp = alertTime,
+        cpu_percent_avg5 = iff(serviceMatches, cpuAvg, real(null)),
+        memory_percent_avg5 = iff(serviceMatches, memoryAvg, real(null)),
+        http_5xx_rate_avg5 = iff(serviceMatches, toscalar(customRows | summarize avg(Http5xxRatePct)), real(null)),
+        db_conn_pool_wait_avg5 = iff(serviceMatches, toscalar(customRows | summarize avg(DbConnPoolWaitMs)), real(null)),
+        request_latency_p99_avg5 = iff(serviceMatches, toscalar(customRows | summarize avg(RequestLatencyP99Ms)), real(null))
+  KQL
+
+  depends_on = [azurerm_monitor_data_collection_rule.app_metrics]
 }
 
 # ---------------------------------------------------------------------------
@@ -324,6 +502,30 @@ output "vm_public_ip" {
 
 output "law_workspace_id" {
   value = azurerm_log_analytics_workspace.law.workspace_id
+}
+
+output "law_workspace_resource_id" {
+  value = azurerm_log_analytics_workspace.law.id
+}
+
+output "app_metrics_dce_logs_ingestion_endpoint" {
+  value = azurerm_monitor_data_collection_endpoint.app_metrics.logs_ingestion_endpoint
+}
+
+output "app_metrics_dcr_immutable_id" {
+  value = azurerm_monitor_data_collection_rule.app_metrics.immutable_id
+}
+
+output "app_metrics_dcr_stream_name" {
+  value = local.app_metrics_stream_name
+}
+
+output "app_metrics_table_name" {
+  value = local.app_metrics_table_name
+}
+
+output "rca_metric_snapshot_function_name" {
+  value = azurerm_log_analytics_saved_search.rca_metric_snapshot.function_alias
 }
 
 output "ssh_command" {

@@ -14,6 +14,7 @@ services:
       - ./config:/app/config:ro   # Config files mounted — hot-swappable
     environment:
       - APP_URL=http://localhost:8080
+      - SERVICE_NAME=payment-api
     depends_on:
       - postgres
       - downstream-service
@@ -93,13 +94,9 @@ services:
       - APP_URL=http://app:8080
       - SERVICE_NAME=payment-api
       - POLL_INTERVAL_S=30
-      - EMIT_INTERVAL_S=60
       - AZURE_DCE_ENDPOINT=${AZURE_DCE_ENDPOINT}
       - AZURE_DCR_IMMUTABLE_ID=${AZURE_DCR_IMMUTABLE_ID}
       - AZURE_DCR_STREAM_NAME=${AZURE_DCR_STREAM_NAME}
-      - AZURE_CLIENT_ID=${AZURE_CLIENT_ID}
-      - AZURE_CLIENT_SECRET=${AZURE_CLIENT_SECRET}
-      - AZURE_TENANT_ID=${AZURE_TENANT_ID}
     command: python3 metrics_emitter.py
     depends_on:
       - app

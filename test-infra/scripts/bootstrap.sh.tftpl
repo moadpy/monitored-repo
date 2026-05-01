@@ -48,9 +48,9 @@ curl -sL https://aka.ms/InstallAzureCLIDeb | bash
 # 7. Clone monitored-repo and start the chaos app
 # ---------------------------------------------------------------------------
 # NOTE: Replace GITHUB_REPO_URL with your actual repo URL
-REPO_URL="${GITHUB_REPO_URL:-https://github.com/moadpy/monitored-repo.git}"
+REPO_URL="$${GITHUB_REPO_URL:-https://github.com/moadpy/monitored-repo.git}"
 
-if [ -d /home/azureuser/chaos-app ]; then
+if [ -d /home/azureuser/monitored-repo ]; then
     echo "Repo already cloned — pulling latest"
     cd /home/azureuser/monitored-repo
     git pull
@@ -64,15 +64,12 @@ chown -R azureuser:azureuser /home/azureuser/monitored-repo
 # ---------------------------------------------------------------------------
 # 8. Create .env for metrics-emitter
 # ---------------------------------------------------------------------------
-cat > /home/azureuser/monitored-repo/chaos-app/.env << 'EOF'
-# Azure Monitor ingestion (filled in after Terraform apply)
-AZURE_DCE_ENDPOINT=
-AZURE_DCR_IMMUTABLE_ID=
-AZURE_DCR_STREAM_NAME=Custom-AppMetrics_CL
-AZURE_CLIENT_ID=
-AZURE_CLIENT_SECRET=
-AZURE_TENANT_ID=
-SERVICE_NAME=payment-api
+cat > /home/azureuser/monitored-repo/chaos-app/.env << EOF
+# Azure Monitor ingestion (provisioned by Terraform)
+AZURE_DCE_ENDPOINT=${azure_dce_endpoint}
+AZURE_DCR_IMMUTABLE_ID=${azure_dcr_immutable_id}
+AZURE_DCR_STREAM_NAME=${azure_dcr_stream_name}
+SERVICE_NAME=${service_name}
 APP_URL=http://localhost:8080
 LOAD_RPS=50
 EOF
@@ -87,5 +84,5 @@ sudo -u azureuser bash -c "
     docker-compose up -d --build
 "
 
-echo "=== Bootstrap complete === $(date -u)"
+echo "=== Bootstrap complete === $$(date -u)"
 echo "App running at http://\$(curl -s ifconfig.me):8080"

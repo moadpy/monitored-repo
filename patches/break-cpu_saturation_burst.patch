@@ -1,14 +1,6 @@
 --- a/chaos-app/config/app.yml
 +++ b/chaos-app/config/app.yml
-@@ -1,7 +1,7 @@
- app:
-   name: payment-api
-   port: 8080
--  worker_threads: 4           # CHAOS_PARAM (cpu) — break: 1, fix: 4
-+  worker_threads: 1           # CHAOS_PARAM (cpu) — break: 1, fix: 4
-   request_timeout_s: 10
- 
-@@ -17,5 +17,5 @@ cache:
+@@ -16,5 +16,5 @@ cache:
  # CPU saturation scenario
  validation:
 -  enable_heavy_validation: false   # CHAOS_PARAM (cpu) — break: true, fix: false

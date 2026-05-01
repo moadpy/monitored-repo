@@ -88,7 +88,7 @@ async def run(app_url: str, rps: int) -> None:
         req_idx = 0
         stats_at = time.monotonic() + 30
         while True:
-            payload = PAYLOADS[req_idx % len(PAYLOADS)]
+            payload = f"{PAYLOADS[req_idx % len(PAYLOADS)]}_{req_idx}"
             asyncio.create_task(send_request(client, app_url, payload))
             req_idx += 1
 

@@ -28,7 +28,7 @@ Merging a PR to this repo causes:
 |---|---|---|
 | `db_pool_exhaustion` | DB connection pool: 100 → 10 | `chaos-app/config/db.yml` |
 | `memory_leak_progressive` | Cache eviction disabled, unlimited size | `chaos-app/config/app.yml` |
-| `cpu_saturation_burst` | Catastrophic regex validation + 1 worker | `chaos-app/config/app.yml` |
+| `cpu_saturation_burst` | Catastrophic regex validation | `chaos-app/config/app.yml` |
 | `cascade_failure` | Downstream URL → dead host, circuit breaker off | `chaos-app/config/services.yml` |
 | `network_partition` | NSG blocks outbound HTTPS via Terraform | `test-infra/terraform.tfvars` |
 
@@ -49,7 +49,7 @@ monitored-repo/
 ├── test-infra/                 # Terraform — VM + NSG + Alert Rules
 │   ├── main.tf                 # NSG chaos toggle + Azure Monitor alert rules
 │   ├── terraform.tfvars        # nsg_block_outbound = false (network_partition toggle)
-│   └── scripts/bootstrap.sh   # Cloud-init: installs Docker, starts app
+│   └── scripts/bootstrap.sh.tftpl # Cloud-init template: installs Docker, starts app
 ├── patches/                    # Pre-written break/fix patches
 │   ├── break-*.patch + .msg    # 5 break patches
 │   └── fix-*.patch + .msg      # 5 fix patches
