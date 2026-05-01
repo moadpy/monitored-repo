@@ -241,9 +241,9 @@ resource "azurerm_monitor_data_collection_rule" "dcr" {
       streams                       = ["Microsoft-Perf"]
       sampling_frequency_in_seconds = 60
       counter_specifiers = [
-        "\\Processor Information(_Total)\\% Processor Time",
-        "\\Memory\\% Committed Bytes In Use",
-        "\\Memory\\Available MBytes",
+        "Processor(*)\\% Processor Time",
+        "Memory(*)\\% Used Memory",
+        "Memory(*)\\Available MBytes Memory",
       ]
     }
   }
@@ -397,14 +397,17 @@ resource "azurerm_log_analytics_saved_search" "rca_metric_snapshot" {
         Perf
         | where TimeGenerated between (windowStart .. alertTime)
         | where _ResourceId == "${azurerm_linux_virtual_machine.vm.id}"
-        | where CounterPath == "\\Processor Information(_Total)\\% Processor Time"
+        | where ObjectName == "Processor"
+        | where CounterName == "% Processor Time"
+        | where InstanceName == "total"
         | summarize avg(CounterValue)
     );
     let memoryAvg = toscalar(
         Perf
         | where TimeGenerated between (windowStart .. alertTime)
         | where _ResourceId == "${azurerm_linux_virtual_machine.vm.id}"
-        | where CounterPath == "\\Memory\\% Committed Bytes In Use"
+        | where ObjectName == "Memory"
+        | where CounterName == "% Used Memory"
         | summarize avg(CounterValue)
     );
     let customRows = materialize(
