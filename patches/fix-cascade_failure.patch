@@ -1,9 +1,12 @@
 --- a/chaos-app/config/services.yml
 +++ b/chaos-app/config/services.yml
-@@ -3,8 +3,8 @@
+@@ -3,10 +3,10 @@
  downstream:
--  payment_gateway_url: "http://dead-host:9999/health"           # CHAOS_PARAM — break: http://dead-host:9999/health
-+  payment_gateway_url: "http://downstream-service:8080/health"  # CHAOS_PARAM — break: http://dead-host:9999/health
+-  payment_gateway_url: "http://10.255.255.1:81/health"          # CHAOS_PARAM — break: http://10.255.255.1:81/health
++  payment_gateway_url: "http://downstream-service:8080/health"  # CHAOS_PARAM — break: http://10.255.255.1:81/health
+   external_dependency_url: "https://worldtimeapi.org/api/timezone/UTC"  # CHAOS_PARAM (network) — used with use_external_dependency: true
+-  use_external_dependency: false
++  use_external_dependency: false
    order_processor_url: "http://downstream-service:8080/health"
    timeout_s: 2
    retry_attempts: 3

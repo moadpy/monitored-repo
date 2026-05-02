@@ -2,14 +2,14 @@
 # CHAOS SIGNATURE: cascade_failure
 
 downstream:
-  payment_gateway_url: "http://downstream-service:8080/health"  # CHAOS_PARAM — break: http://dead-host:9999/health
+  payment_gateway_url: "http://downstream-service:8080/health"  # CHAOS_PARAM — break: http://10.255.255.1:81/health fix http://downstream-service:8080/health
   external_dependency_url: "https://worldtimeapi.org/api/timezone/UTC"  # CHAOS_PARAM (network) — used with use_external_dependency: true
   use_external_dependency: false
   order_processor_url: "http://downstream-service:8080/health"
-  timeout_s: 2
-  retry_attempts: 3
+  timeout_s: 3
+  retry_attempts: 4
 
 circuit_breaker:
-  enabled: true               # CHAOS_PARAM — break: false, fix: true
+  enabled: true             # CHAOS_PARAM — break: false, fix: true
   failure_threshold: 5
   recovery_timeout_s: 30

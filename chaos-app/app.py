@@ -75,6 +75,14 @@ def get_svc_cfg() -> dict:
     return load_config("services.yml")
 
 
+def get_effective_downstream_url() -> str:
+    svc_cfg = get_svc_cfg()
+    downstream_cfg = svc_cfg["downstream"]
+    if downstream_cfg.get("use_external_dependency", False):
+        return downstream_cfg["external_dependency_url"]
+    return downstream_cfg["payment_gateway_url"]
+
+
 # ---------------------------------------------------------------------------
 # In-memory cache (for memory leak scenario)
 # ---------------------------------------------------------------------------
@@ -83,6 +91,11 @@ _cache_bytes = 0
 _cache_seq = 0
 _cache_lock = threading.Lock()
 _metrics_lock = threading.Lock()
+_cascade_backlog: deque[bytes] = deque()
+_cascade_backlog_bytes = 0
+_cascade_lock = threading.Lock()
+CASCADE_BACKLOG_MAX_BYTES = 256 * 1024 * 1024
+CASCADE_PRESSURE_WINDOW_S = 20
 
 
 def cache_get(key: str) -> bytes | None:
@@ -119,6 +132,34 @@ def get_cache_size_mb() -> float:
         return _cache_bytes / (1024 * 1024)
 
 
+def _clear_cascade_backlog() -> None:
+    global _cascade_backlog_bytes
+    with _cascade_lock:
+        _cascade_backlog.clear()
+        _cascade_backlog_bytes = 0
+
+
+def _push_cascade_backlog(payload: str, chunk_mb: int = 8) -> None:
+    global _cascade_backlog_bytes
+    base = payload.encode("utf-8")[:256] or b"x"
+    target_size = chunk_mb * 1024 * 1024
+    block = (base * ((target_size // len(base)) + 1))[:target_size]
+    with _cascade_lock:
+        _cascade_backlog.append(block)
+        _cascade_backlog_bytes += len(block)
+        while _cascade_backlog_bytes > CASCADE_BACKLOG_MAX_BYTES and _cascade_backlog:
+            _cascade_backlog_bytes -= len(_cascade_backlog.popleft())
+
+
+def get_cascade_backlog_mb() -> float:
+    with _cascade_lock:
+        return _cascade_backlog_bytes / (1024 * 1024)
+
+
+def get_app_memory_pressure_mb() -> float:
+    return get_cache_size_mb() + get_cascade_backlog_mb()
+
+
 def cache_tick() -> None:
     global _cache_seq
     key = f"bg:{_cache_seq}"
@@ -130,6 +171,7 @@ def cache_tick() -> None:
 # DB pool (rebuilt each time config changes)
 # ---------------------------------------------------------------------------
 _db_pool: psycopg2.pool.ThreadedConnectionPool | None = None
+_db_pool_signature: tuple[Any, ...] | None = None
 _db_pool_lock = threading.Lock()
 _downstream_client: httpx.AsyncClient | None = None
 _last_db_wait_ms = 0.0
@@ -140,9 +182,26 @@ _downstream_cache_lock = threading.Lock()
 
 
 def get_db_pool() -> psycopg2.pool.ThreadedConnectionPool:
-    global _db_pool
+    global _db_pool, _db_pool_signature
     with _db_pool_lock:
         cfg = get_db_cfg()
+        signature = (
+            cfg["host"],
+            cfg["port"],
+            cfg["name"],
+            cfg["user"],
+            cfg["max_pool_size"],
+            cfg["connection_timeout_s"],
+        )
+
+        if _db_pool is not None and _db_pool_signature != signature:
+            try:
+                _db_pool.closeall()
+            except Exception:
+                pass
+            _db_pool = None
+            _db_pool_signature = None
+
         if _db_pool is None:
             try:
                 _db_pool = psycopg2.pool.ThreadedConnectionPool(
@@ -155,14 +214,17 @@ def get_db_pool() -> psycopg2.pool.ThreadedConnectionPool:
                     password=cfg["password"],
                     connect_timeout=cfg["connection_timeout_s"],
                 )
-            except Exception:
+                _db_pool_signature = signature
+            except Exception as e:
+                print(f"[db-pool] Failed to initialize pool: {e}")
                 _db_pool = None
+                _db_pool_signature = None
     return _db_pool
 
 
 def reset_db_pool() -> None:
     """Call after config change to rebuild pool with new max_pool_size."""
-    global _db_pool
+    global _db_pool, _db_pool_signature
     with _db_pool_lock:
         if _db_pool:
             try:
@@ -170,6 +232,7 @@ def reset_db_pool() -> None:
             except Exception:
                 pass
         _db_pool = None
+        _db_pool_signature = None
 
 
 def get_last_db_wait_ms() -> float:
@@ -233,7 +296,7 @@ def _write_worker_snapshot() -> None:
         "error_count": stats["error_count"],
         "durations_ms": stats["durations_ms"],
         "db_conn_pool_wait_ms": round(get_last_db_wait_ms(), 2),
-        "cache_size_mb": round(get_cache_size_mb(), 2),
+        "cache_size_mb": round(get_app_memory_pressure_mb(), 2),
         "circuit_open": _circuit_open,
         "failure_count": _failure_count,
     }
@@ -337,6 +400,74 @@ def validate_payload(data: str) -> bool:
     return bool(SIMPLE_REGEX.match(data[:100]))
 
 
+def _borrow_db_connection(timeout_s: float) -> tuple[psycopg2.extensions.connection | None, float]:
+    pool = get_db_pool()
+    if pool is None:
+        return None, 0.0
+
+    started = time.perf_counter()
+    deadline = started + timeout_s
+    while True:
+        try:
+            conn = pool.getconn()
+            return conn, (time.perf_counter() - started) * 1000
+        except psycopg2.pool.PoolError:
+            if time.perf_counter() >= deadline:
+                raise
+            time.sleep(0.01)
+
+
+def _hold_db_connection(hold_s: float) -> float:
+    cfg = get_db_cfg()
+    pool = get_db_pool()
+    if pool is None:
+        return 0.0
+
+    conn, wait_ms = _borrow_db_connection(float(cfg.get("connection_timeout_s", 5)))
+    if conn is None:
+        return 0.0
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT 1")
+        cur.fetchone()
+        time.sleep(hold_s)
+        cur.close()
+    finally:
+        pool.putconn(conn)
+    return wait_ms
+
+
+def _cascade_cpu_burn(duration_s: float) -> None:
+    deadline = time.perf_counter() + duration_s
+    acc = 0
+    while time.perf_counter() < deadline:
+        for i in range(8000):
+            acc = ((acc * 33) ^ i) % 1_000_003
+    if acc == -1:
+        print("unreachable")
+
+
+def _cascade_pressure_active() -> bool:
+    if get_svc_cfg()["downstream"].get("use_external_dependency", False):
+        return False
+    return _failure_count > 0 and (time.monotonic() - _last_failure_time) < CASCADE_PRESSURE_WINDOW_S
+
+
+async def amplify_cascade_failure(payload: str) -> None:
+    if get_svc_cfg()["downstream"].get("use_external_dependency", False):
+        return
+
+    _push_cascade_backlog(payload, chunk_mb=4)
+    _cascade_cpu_burn(0.25)
+    results = await asyncio.gather(
+        *(asyncio.to_thread(_hold_db_connection, 0.5) for _ in range(2)),
+        return_exceptions=True,
+    )
+    db_waits = [float(item) for item in results if not isinstance(item, Exception)]
+    if db_waits:
+        set_last_db_wait_ms(max(get_last_db_wait_ms(), max(db_waits)))
+
+
 # ---------------------------------------------------------------------------
 # Downstream call (for cascade_failure scenario)
 # ---------------------------------------------------------------------------
@@ -351,34 +482,52 @@ async def call_downstream() -> dict:
         else downstream_cfg["payment_gateway_url"]
     )
     timeout = downstream_cfg["timeout_s"]
+    retry_attempts = max(1, int(downstream_cfg.get("retry_attempts", 1)))
+    retry_backoff_s = float(downstream_cfg.get("retry_backoff_s", 0.2))
     cb_enabled = svc_cfg["circuit_breaker"]["enabled"]
+    cb_short_circuit_enabled = cb_enabled and not use_external
     now = time.monotonic()
 
-    if cb_enabled and _circuit_open:
+    if cb_short_circuit_enabled and _circuit_open:
         return {"status": "circuit_open", "skipped": True}
 
     with _downstream_cache_lock:
         cached = _downstream_cache
-        if cb_enabled and cached and cached[0] == url and now - cached[1] < 0.25:
+        if cb_short_circuit_enabled and cached and cached[0] == url and now - cached[1] < 0.25:
             return cached[2]
 
-    try:
-        client = _downstream_client
-        if client is None:
-            async with httpx.AsyncClient(timeout=timeout) as fallback_client:
-                r = await fallback_client.get(url)
-        else:
-            r = await client.get(url, timeout=timeout)
-        _record_downstream_success()
-        result = {"status": r.status_code, "ok": r.is_success}
-        with _downstream_cache_lock:
-            _downstream_cache = (url, now, result)
-        return result
-    except Exception as e:
-        _record_downstream_failure()
-        with _downstream_cache_lock:
-            _downstream_cache = None
-        raise HTTPException(status_code=502, detail=f"Downstream failed: {e}")
+    last_error: Exception | None = None
+    for attempt in range(1, retry_attempts + 1):
+        try:
+            client = _downstream_client
+            if client is None:
+                async with httpx.AsyncClient(timeout=timeout) as fallback_client:
+                    r = await fallback_client.get(url)
+            else:
+                r = await client.get(url, timeout=timeout)
+
+            if not r.is_success:
+                raise HTTPException(status_code=502, detail=f"Downstream returned status {r.status_code}")
+
+            _record_downstream_success()
+            result = {"status": r.status_code, "ok": True}
+            with _downstream_cache_lock:
+                _downstream_cache = (url, now, result)
+            return result
+        except Exception as e:
+            last_error = e
+            if attempt < retry_attempts:
+                await asyncio.sleep(min(retry_backoff_s * attempt, 1.0))
+
+    _record_downstream_failure()
+    with _downstream_cache_lock:
+        _downstream_cache = None
+
+    if isinstance(last_error, HTTPException):
+        detail = last_error.detail
+    else:
+        detail = str(last_error)
+    raise HTTPException(status_code=502, detail=f"Downstream failed after {retry_attempts} attempts: {detail}")
 
 
 # ---------------------------------------------------------------------------
@@ -395,7 +544,7 @@ def _record_downstream_failure() -> None:
     _last_failure_time = time.monotonic()
     svc_cfg = get_svc_cfg()
     threshold = svc_cfg["circuit_breaker"]["failure_threshold"]
-    if _failure_count >= threshold:
+    if svc_cfg["circuit_breaker"].get("enabled", True) and _failure_count >= threshold:
         _circuit_open = True
 
 
@@ -403,6 +552,7 @@ def _record_downstream_success() -> None:
     global _circuit_open, _failure_count
     _failure_count = 0
     _circuit_open = False
+    _clear_cascade_backlog()
 
 
 async def _circuit_reset_task() -> None:
@@ -419,13 +569,14 @@ async def _circuit_reset_task() -> None:
 
 
 def _db_probe_once() -> float:
+    cfg = get_db_cfg()
     pool = get_db_pool()
     if pool is None:
         return 0.0
 
-    started = time.perf_counter()
-    conn = pool.getconn()
-    wait_ms = (time.perf_counter() - started) * 1000
+    conn, wait_ms = _borrow_db_connection(float(cfg.get("connection_timeout_s", 5)))
+    if conn is None:
+        return 0.0
     try:
         cur = conn.cursor()
         cur.execute("SELECT 1")
@@ -442,7 +593,6 @@ async def _db_probe_task() -> None:
         cfg = get_db_cfg()
         max_pool_size = int(cfg.get("max_pool_size", 100))
         if max_pool_size >= 100:
-            set_last_db_wait_ms(0.0)
             await asyncio.sleep(1)
             continue
 
@@ -463,6 +613,24 @@ async def _cache_maintenance_task() -> None:
         await asyncio.sleep(1)
 
 
+async def _cascade_pressure_task() -> None:
+    while True:
+        if _cascade_pressure_active():
+            _push_cascade_backlog(f"cascade:{os.getpid()}:{time.time()}", chunk_mb=6)
+            results = await asyncio.gather(
+                asyncio.to_thread(_cascade_cpu_burn, 0.45),
+                *(asyncio.to_thread(_hold_db_connection, 0.9) for _ in range(3)),
+                return_exceptions=True,
+            )
+            db_waits = [float(item) for item in results[1:] if not isinstance(item, Exception)]
+            if db_waits:
+                set_last_db_wait_ms(max(get_last_db_wait_ms(), max(db_waits)))
+        else:
+            if get_cascade_backlog_mb() > 0 and _failure_count == 0:
+                _clear_cascade_backlog()
+            await asyncio.sleep(0.5)
+
+
 async def _publish_metrics_snapshot_task() -> None:
     while True:
         _write_worker_snapshot()
@@ -478,20 +646,29 @@ async def lifespan(app: FastAPI):
     _downstream_client = httpx.AsyncClient()
     circuit_task = asyncio.create_task(_circuit_reset_task())
     cache_task = asyncio.create_task(_cache_maintenance_task())
+    cascade_task = asyncio.create_task(_cascade_pressure_task())
     db_task = asyncio.create_task(_db_probe_task())
     snapshot_task = asyncio.create_task(_publish_metrics_snapshot_task())
     try:
         yield
     finally:
-        for task in (circuit_task, cache_task, db_task, snapshot_task):
+        for task in (circuit_task, cache_task, cascade_task, db_task, snapshot_task):
             task.cancel()
         with suppress(Exception):
-            await asyncio.gather(circuit_task, cache_task, db_task, snapshot_task, return_exceptions=True)
+            await asyncio.gather(
+                circuit_task,
+                cache_task,
+                cascade_task,
+                db_task,
+                snapshot_task,
+                return_exceptions=True,
+            )
         if _downstream_client is not None:
             await _downstream_client.aclose()
             _downstream_client = None
         _remove_worker_snapshot()
         reset_db_pool()
+        _clear_cascade_backlog()
 
 
 app = FastAPI(
@@ -535,9 +712,12 @@ async def process_request(payload: str = "hello"):
     except HTTPException as e:
         downstream_ok = False
         errors.append(f"downstream: {e.detail}")
+        await amplify_cascade_failure(payload)
 
     duration_ms = (time.perf_counter() - start) * 1000
     set_last_request_duration_ms(duration_ms)
+    if downstream_ok and int(get_db_cfg().get("max_pool_size", 100)) >= 100:
+        set_last_db_wait_ms(0.0)
     db_wait_ms = get_last_db_wait_ms()
 
     if errors and not downstream_ok:
@@ -553,7 +733,7 @@ async def process_request(payload: str = "hello"):
         "ok": True,
         "duration_ms": round(duration_ms, 1),
         "db_wait_ms": round(db_wait_ms, 1),
-        "cache_size_mb": round(get_cache_size_mb(), 2),
+        "cache_size_mb": round(get_app_memory_pressure_mb(), 2),
     }
 
 
@@ -576,6 +756,38 @@ async def reload_config():
     global _downstream_cache
     reset_config_cache()
     reset_db_pool()
+    _clear_cascade_backlog()
     with _downstream_cache_lock:
         _downstream_cache = None
     return {"ok": True, "message": "Config reloaded — DB pool reset"}
+
+
+@app.get("/admin/runtime-state")
+async def runtime_state():
+    db_cfg = get_db_cfg()
+    svc_cfg = get_svc_cfg()
+    return {
+        "service_name": SERVICE_NAME,
+        "effective_downstream_url": get_effective_downstream_url(),
+        "downstream": {
+            "payment_gateway_url": svc_cfg["downstream"]["payment_gateway_url"],
+            "external_dependency_url": svc_cfg["downstream"]["external_dependency_url"],
+            "use_external_dependency": svc_cfg["downstream"].get("use_external_dependency", False),
+            "timeout_s": svc_cfg["downstream"]["timeout_s"],
+            "retry_attempts": svc_cfg["downstream"].get("retry_attempts", 1),
+        },
+        "circuit_breaker": svc_cfg["circuit_breaker"],
+        "database": {
+            "host": db_cfg["host"],
+            "port": db_cfg["port"],
+            "max_pool_size": db_cfg["max_pool_size"],
+            "connection_timeout_s": db_cfg["connection_timeout_s"],
+        },
+        "runtime": {
+            "circuit_open": _circuit_open,
+            "failure_count": _failure_count,
+            "last_db_wait_ms": get_last_db_wait_ms(),
+            "cascade_backlog_mb": round(get_cascade_backlog_mb(), 2),
+            "cascade_pressure_active": _cascade_pressure_active(),
+        },
+    }
