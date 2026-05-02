@@ -343,8 +343,14 @@ def validate_payload(data: str) -> bool:
 async def call_downstream() -> dict:
     global _downstream_cache
     svc_cfg = get_svc_cfg()
-    url = svc_cfg["downstream"]["payment_gateway_url"]
-    timeout = svc_cfg["downstream"]["timeout_s"]
+    downstream_cfg = svc_cfg["downstream"]
+    use_external = downstream_cfg.get("use_external_dependency", False)
+    url = (
+        downstream_cfg["external_dependency_url"]
+        if use_external
+        else downstream_cfg["payment_gateway_url"]
+    )
+    timeout = downstream_cfg["timeout_s"]
     cb_enabled = svc_cfg["circuit_breaker"]["enabled"]
     now = time.monotonic()
 

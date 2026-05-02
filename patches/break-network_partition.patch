@@ -1,3 +1,15 @@
+--- a/chaos-app/config/services.yml
++++ b/chaos-app/config/services.yml
+@@ -3,7 +3,7 @@
+ downstream:
+   payment_gateway_url: "http://downstream-service:8080/health"  # CHAOS_PARAM — break: http://dead-host:9999/health
+   external_dependency_url: "https://worldtimeapi.org/api/timezone/UTC"  # CHAOS_PARAM (network) — used with use_external_dependency: true
+-  use_external_dependency: false
++  use_external_dependency: true
+   order_processor_url: "http://downstream-service:8080/health"
+   timeout_s: 2
+   retry_attempts: 3
+
 --- a/test-infra/terraform.tfvars
 +++ b/test-infra/terraform.tfvars
 @@ -1,4 +1,4 @@

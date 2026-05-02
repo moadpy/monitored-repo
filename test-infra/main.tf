@@ -444,15 +444,15 @@ resource "azurerm_monitor_action_group" "rca_webhook" {
 }
 
 # ---------------------------------------------------------------------------
-# Alert Rules — one per signature
+# Alert Rules — one per breaching metric
 # ---------------------------------------------------------------------------
 
-# 1. cpu_saturation_burst — CPU > 90% for 3 min
-resource "azurerm_monitor_metric_alert" "cpu_saturation" {
-  name                = "alert-cpu-saturation-burst"
+# 1. Percentage CPU > 90% over 5 minutes
+resource "azurerm_monitor_metric_alert" "cpu_percent_high" {
+  name                = "alert-percentage-cpu-high"
   resource_group_name = azurerm_resource_group.rg.name
   scopes              = [azurerm_linux_virtual_machine.vm.id]
-  description         = "CPU > 90% — signature: cpu_saturation_burst"
+  description         = "Percentage CPU > 90% over a 5-minute evaluation window"
   severity            = 2
   frequency           = "PT1M"
   window_size         = "PT5M"
@@ -468,18 +468,18 @@ resource "azurerm_monitor_metric_alert" "cpu_saturation" {
   action {
     action_group_id = azurerm_monitor_action_group.rca_webhook.id
     webhook_properties = {
-      service_name       = "payment-api"
-      incident_signature = "cpu_saturation_burst"
+      service_name     = local.service_name
+      breaching_metric = "percentage_cpu"
     }
   }
 }
 
-# 2. memory_leak_progressive — Available Memory < 1500 MB (on 8 GB VM ≈ 81%)
-resource "azurerm_monitor_metric_alert" "memory_leak" {
-  name                = "alert-memory-leak-progressive"
+# 2. Available Memory Bytes < 1500 MB over 5 minutes
+resource "azurerm_monitor_metric_alert" "available_memory_bytes_low" {
+  name                = "alert-available-memory-bytes-low"
   resource_group_name = azurerm_resource_group.rg.name
   scopes              = [azurerm_linux_virtual_machine.vm.id]
-  description         = "Available memory < 1500 MB — signature: memory_leak_progressive"
+  description         = "Available Memory Bytes < 1500 MB over a 5-minute evaluation window"
   severity            = 2
   frequency           = "PT1M"
   window_size         = "PT5M"
@@ -495,10 +495,136 @@ resource "azurerm_monitor_metric_alert" "memory_leak" {
   action {
     action_group_id = azurerm_monitor_action_group.rca_webhook.id
     webhook_properties = {
-      service_name       = "payment-api"
-      incident_signature = "memory_leak_progressive"
+      service_name     = local.service_name
+      breaching_metric = "available_memory_bytes"
     }
   }
+}
+
+# 3. DB connection pool wait > 200 ms over 5 minutes
+resource "azurerm_monitor_scheduled_query_rules_alert_v2" "db_conn_pool_wait_high" {
+  name                = "alert-db-conn-pool-wait-high"
+  resource_group_name = azurerm_resource_group.rg.name
+  location            = azurerm_resource_group.rg.location
+  scopes              = [azurerm_log_analytics_workspace.law.id]
+  severity            = 2
+  description         = "DB connection pool wait > 200 ms over a 5-minute evaluation window"
+  evaluation_frequency = "PT1M"
+  window_duration      = "PT5M"
+  enabled              = true
+  auto_mitigation_enabled = false
+  skip_query_validation   = true
+
+  criteria {
+    query = <<-KQL
+      AppMetricsRaw_CL
+      | where ServiceName == "${local.service_name}"
+      | summarize AggregatedValue = avg(DbConnPoolWaitMs)
+    KQL
+    time_aggregation_method = "Average"
+    operator                = "GreaterThan"
+    threshold               = 200
+    metric_measure_column   = "AggregatedValue"
+
+    failing_periods {
+      minimum_failing_periods_to_trigger_alert = 1
+      number_of_evaluation_periods             = 1
+    }
+  }
+
+  action {
+    action_groups = [azurerm_monitor_action_group.rca_webhook.id]
+    custom_properties = {
+      service_name     = local.service_name
+      breaching_metric = "db_conn_pool_wait_ms"
+    }
+  }
+
+  depends_on = [azurerm_monitor_data_collection_rule.app_metrics]
+}
+
+# 4. HTTP 5xx rate > 20% over 5 minutes
+resource "azurerm_monitor_scheduled_query_rules_alert_v2" "http_5xx_rate_high" {
+  name                = "alert-http-5xx-rate-high"
+  resource_group_name = azurerm_resource_group.rg.name
+  location            = azurerm_resource_group.rg.location
+  scopes              = [azurerm_log_analytics_workspace.law.id]
+  severity            = 2
+  description         = "HTTP 5xx rate > 20% over a 5-minute evaluation window"
+  evaluation_frequency = "PT1M"
+  window_duration      = "PT5M"
+  enabled              = true
+  auto_mitigation_enabled = false
+  skip_query_validation   = true
+
+  criteria {
+    query = <<-KQL
+      AppMetricsRaw_CL
+      | where ServiceName == "${local.service_name}"
+      | summarize AggregatedValue = avg(Http5xxRatePct)
+    KQL
+    time_aggregation_method = "Average"
+    operator                = "GreaterThan"
+    threshold               = 20
+    metric_measure_column   = "AggregatedValue"
+
+    failing_periods {
+      minimum_failing_periods_to_trigger_alert = 1
+      number_of_evaluation_periods             = 1
+    }
+  }
+
+  action {
+    action_groups = [azurerm_monitor_action_group.rca_webhook.id]
+    custom_properties = {
+      service_name     = local.service_name
+      breaching_metric = "http_5xx_rate_pct"
+    }
+  }
+
+  depends_on = [azurerm_monitor_data_collection_rule.app_metrics]
+}
+
+# 5. Request latency p99 > 1000 ms over 5 minutes
+resource "azurerm_monitor_scheduled_query_rules_alert_v2" "request_latency_p99_high" {
+  name                = "alert-request-latency-p99-high"
+  resource_group_name = azurerm_resource_group.rg.name
+  location            = azurerm_resource_group.rg.location
+  scopes              = [azurerm_log_analytics_workspace.law.id]
+  severity            = 2
+  description         = "Request latency p99 > 1000 ms over a 5-minute evaluation window"
+  evaluation_frequency = "PT1M"
+  window_duration      = "PT5M"
+  enabled              = true
+  auto_mitigation_enabled = false
+  skip_query_validation   = true
+
+  criteria {
+    query = <<-KQL
+      AppMetricsRaw_CL
+      | where ServiceName == "${local.service_name}"
+      | summarize AggregatedValue = avg(RequestLatencyP99Ms)
+    KQL
+    time_aggregation_method = "Average"
+    operator                = "GreaterThan"
+    threshold               = 1000
+    metric_measure_column   = "AggregatedValue"
+
+    failing_periods {
+      minimum_failing_periods_to_trigger_alert = 1
+      number_of_evaluation_periods             = 1
+    }
+  }
+
+  action {
+    action_groups = [azurerm_monitor_action_group.rca_webhook.id]
+    custom_properties = {
+      service_name     = local.service_name
+      breaching_metric = "request_latency_p99_ms"
+    }
+  }
+
+  depends_on = [azurerm_monitor_data_collection_rule.app_metrics]
 }
 
 # ---------------------------------------------------------------------------
