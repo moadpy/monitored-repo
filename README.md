@@ -95,4 +95,6 @@ docker-compose -f ~/monitored-repo/chaos-app/docker-compose.yml ps
 curl http://localhost:8080/health
 
 test github ingestor
+test github ingestor
+
 ```
