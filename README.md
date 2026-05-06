@@ -93,4 +93,6 @@ terraform output vm_public_ip
 ssh azureuser@<vm_ip>
 docker-compose -f ~/monitored-repo/chaos-app/docker-compose.yml ps
 curl http://localhost:8080/health
+
+test github ingestor
 ```
