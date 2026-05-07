@@ -35,12 +35,12 @@ jobs:
             chaos-app/config/db.yml \
             chaos-app/config/app.yml \
             chaos-app/config/services.yml \
-            azureuser@${{ secrets.VM_PUBLIC_IP }}:~/chaos-app/config/
+            azureuser@${{ secrets.VM_PUBLIC_IP }}:~/monitored-repo/chaos-app/config/
 
       - name: Reload app config (restart app container)
         run: |
           ssh -i ~/.ssh/chaos_key azureuser@${{ secrets.VM_PUBLIC_IP }} \
-            "cd ~/chaos-app && docker-compose restart app && \
+            "cd ~/monitored-repo/chaos-app && docker-compose restart app && \
              sleep 5 && \
              curl -s -X POST http://localhost:8080/admin/reload-config"
 

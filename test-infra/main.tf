@@ -163,6 +163,20 @@ resource "azurerm_network_interface" "nic" {
 }
 
 # ---------------------------------------------------------------------------
+# SSH Key Generation
+# ---------------------------------------------------------------------------
+resource "tls_private_key" "vm_ssh_key" {
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
+
+resource "local_sensitive_file" "vm_private_key" {
+  content         = tls_private_key.vm_ssh_key.private_key_pem
+  filename        = "${path.module}/vm_ssh_key.pem"
+  file_permission = "0600"
+}
+
+# ---------------------------------------------------------------------------
 # Virtual Machine
 # ---------------------------------------------------------------------------
 resource "azurerm_linux_virtual_machine" "vm" {
@@ -176,7 +190,7 @@ resource "azurerm_linux_virtual_machine" "vm" {
 
   admin_ssh_key {
     username   = "azureuser"
-    public_key = file(pathexpand("~/.ssh/id_rsa.pub"))
+    public_key = tls_private_key.vm_ssh_key.public_key_openssh
   }
 
   os_disk {
@@ -503,20 +517,20 @@ resource "azurerm_monitor_metric_alert" "available_memory_bytes_low" {
 
 # 3. DB connection pool wait > 200 ms over 5 minutes
 resource "azurerm_monitor_scheduled_query_rules_alert_v2" "db_conn_pool_wait_high" {
-  name                = "alert-db-conn-pool-wait-high"
-  resource_group_name = azurerm_resource_group.rg.name
-  location            = azurerm_resource_group.rg.location
-  scopes              = [azurerm_log_analytics_workspace.law.id]
-  severity            = 2
-  description         = "DB connection pool wait > 200 ms over a 5-minute evaluation window"
-  evaluation_frequency = "PT1M"
-  window_duration      = "PT5M"
-  enabled              = true
+  name                    = "alert-db-conn-pool-wait-high"
+  resource_group_name     = azurerm_resource_group.rg.name
+  location                = azurerm_resource_group.rg.location
+  scopes                  = [azurerm_log_analytics_workspace.law.id]
+  severity                = 2
+  description             = "DB connection pool wait > 200 ms over a 5-minute evaluation window"
+  evaluation_frequency    = "PT1M"
+  window_duration         = "PT5M"
+  enabled                 = true
   auto_mitigation_enabled = false
   skip_query_validation   = true
 
   criteria {
-    query = <<-KQL
+    query                   = <<-KQL
       AppMetricsRaw_CL
       | where ServiceName == "${local.service_name}"
       | summarize AggregatedValue = avg(DbConnPoolWaitMs)
@@ -545,20 +559,20 @@ resource "azurerm_monitor_scheduled_query_rules_alert_v2" "db_conn_pool_wait_hig
 
 # 4. HTTP 5xx rate > 20% over 5 minutes
 resource "azurerm_monitor_scheduled_query_rules_alert_v2" "http_5xx_rate_high" {
-  name                = "alert-http-5xx-rate-high"
-  resource_group_name = azurerm_resource_group.rg.name
-  location            = azurerm_resource_group.rg.location
-  scopes              = [azurerm_log_analytics_workspace.law.id]
-  severity            = 2
-  description         = "HTTP 5xx rate > 20% over a 5-minute evaluation window"
-  evaluation_frequency = "PT1M"
-  window_duration      = "PT5M"
-  enabled              = true
+  name                    = "alert-http-5xx-rate-high"
+  resource_group_name     = azurerm_resource_group.rg.name
+  location                = azurerm_resource_group.rg.location
+  scopes                  = [azurerm_log_analytics_workspace.law.id]
+  severity                = 2
+  description             = "HTTP 5xx rate > 20% over a 5-minute evaluation window"
+  evaluation_frequency    = "PT1M"
+  window_duration         = "PT5M"
+  enabled                 = true
   auto_mitigation_enabled = false
   skip_query_validation   = true
 
   criteria {
-    query = <<-KQL
+    query                   = <<-KQL
       AppMetricsRaw_CL
       | where ServiceName == "${local.service_name}"
       | summarize AggregatedValue = avg(Http5xxRatePct)
@@ -587,20 +601,20 @@ resource "azurerm_monitor_scheduled_query_rules_alert_v2" "http_5xx_rate_high" {
 
 # 5. Request latency p99 > 1000 ms over 5 minutes
 resource "azurerm_monitor_scheduled_query_rules_alert_v2" "request_latency_p99_high" {
-  name                = "alert-request-latency-p99-high"
-  resource_group_name = azurerm_resource_group.rg.name
-  location            = azurerm_resource_group.rg.location
-  scopes              = [azurerm_log_analytics_workspace.law.id]
-  severity            = 2
-  description         = "Request latency p99 > 1000 ms over a 5-minute evaluation window"
-  evaluation_frequency = "PT1M"
-  window_duration      = "PT5M"
-  enabled              = true
+  name                    = "alert-request-latency-p99-high"
+  resource_group_name     = azurerm_resource_group.rg.name
+  location                = azurerm_resource_group.rg.location
+  scopes                  = [azurerm_log_analytics_workspace.law.id]
+  severity                = 2
+  description             = "Request latency p99 > 1000 ms over a 5-minute evaluation window"
+  evaluation_frequency    = "PT1M"
+  window_duration         = "PT5M"
+  enabled                 = true
   auto_mitigation_enabled = false
   skip_query_validation   = true
 
   criteria {
-    query = <<-KQL
+    query                   = <<-KQL
       AppMetricsRaw_CL
       | where ServiceName == "${local.service_name}"
       | summarize AggregatedValue = avg(RequestLatencyP99Ms)
@@ -663,7 +677,7 @@ output "rca_metric_snapshot_function_name" {
 }
 
 output "ssh_command" {
-  value = "ssh azureuser@${azurerm_public_ip.pip.ip_address}"
+  value = "ssh -i ${local_sensitive_file.vm_private_key.filename} azureuser@${azurerm_public_ip.pip.ip_address}"
 }
 
 output "nsg_block_outbound_status" {
