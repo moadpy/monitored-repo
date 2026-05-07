@@ -15,8 +15,6 @@ jobs:
   deploy-app-config:
     name: Deploy Config to VM
     runs-on: ubuntu-latest
-    if: |
-      contains(join(github.event.commits.*.modified, ' '), 'chaos-app/config/')
 
     steps:
       - name: Checkout
@@ -58,8 +56,6 @@ jobs:
   deploy-infra:
     name: Apply Terraform NSG Change
     runs-on: ubuntu-latest
-    if: |
-      contains(join(github.event.commits.*.modified, ' '), 'test-infra/terraform.tfvars')
 
     steps:
       - name: Checkout
