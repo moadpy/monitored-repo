@@ -515,14 +515,14 @@ resource "azurerm_monitor_metric_alert" "available_memory_bytes_low" {
   }
 }
 
-# 3. DB connection pool wait > 200 ms over 5 minutes
+# 3. DB connection pool wait > 90 ms over 5 minutes
 resource "azurerm_monitor_scheduled_query_rules_alert_v2" "db_conn_pool_wait_high" {
   name                    = "alert-db-conn-pool-wait-high"
   resource_group_name     = azurerm_resource_group.rg.name
   location                = azurerm_resource_group.rg.location
   scopes                  = [azurerm_log_analytics_workspace.law.id]
   severity                = 2
-  description             = "DB connection pool wait > 200 ms over a 5-minute evaluation window"
+  description             = "DB connection pool wait > 90 ms over a 5-minute evaluation window"
   evaluation_frequency    = "PT1M"
   window_duration         = "PT5M"
   enabled                 = true
@@ -537,7 +537,7 @@ resource "azurerm_monitor_scheduled_query_rules_alert_v2" "db_conn_pool_wait_hig
     KQL
     time_aggregation_method = "Average"
     operator                = "GreaterThan"
-    threshold               = 200
+    threshold               = 90
     metric_measure_column   = "AggregatedValue"
 
     failing_periods {

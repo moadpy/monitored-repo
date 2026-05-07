@@ -581,7 +581,7 @@ def _db_probe_once() -> float:
         cur = conn.cursor()
         cur.execute("SELECT 1")
         cur.fetchone()
-        time.sleep(0.6)
+        time.sleep(0.35)
         cur.close()
     finally:
         pool.putconn(conn)
@@ -596,7 +596,7 @@ async def _db_probe_task() -> None:
             await asyncio.sleep(1)
             continue
 
-        probe_width = min(max(max_pool_size * 3, 20), 40)
+        probe_width = min(max(max_pool_size + 6, 12), 20)
         results = await asyncio.gather(
             *(asyncio.to_thread(_db_probe_once) for _ in range(probe_width)),
             return_exceptions=True,
@@ -604,7 +604,7 @@ async def _db_probe_task() -> None:
         waits = [float(item) for item in results if not isinstance(item, Exception)]
         if waits:
             set_last_db_wait_ms(max(waits))
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(1)
 
 
 async def _cache_maintenance_task() -> None:
