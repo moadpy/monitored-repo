@@ -782,238 +782,28 @@ def _aggregate_worker_snapshots() -> dict[str, Any]:
 
 async def _publish_metrics_snapshot_task() -> None:
     while True:
-        try:
-            conn = pool.getconn()
-            return conn, (time.perf_counter() - started) * 1000
-        except psycopg2.pool.PoolError:
-            if time.perf_counter() >= deadline:
-                raise
-            time.sleep(0.01)
-
-
-def _hold_db_connection(hold_s: float) -> float:
-    cfg = get_db_cfg()
-    pool = get_db_pool()
-    if pool is None:
-        return 0.0
-
-    conn, wait_ms = _borrow_db_connection(float(cfg.get("connection_timeout_s", 5)))
-    if conn is None:
-        return 0.0
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT 1")
-        cur.fetchone()
-        time.sleep(hold_s)
-        cur.close()
-    finally:
-        pool.putconn(conn)
-    return wait_ms
-
-
-def _cascade_cpu_burn(duration_s: float) -> None:
-    deadline = time.perf_counter() + duration_s
-    acc = 0
-    while time.perf_counter() < deadline:
-        for i in range(8000):
-            acc = ((acc * 33) ^ i) % 1_000_003
-    if acc == -1:
-        print("unreachable")
-
-
-def _cascade_pressure_active() -> bool:
-    if get_svc_cfg()["downstream"].get("use_external_dependency", False):
-        return False
-    return _failure_count > 0 and (time.monotonic() - _last_failure_time) < CASCADE_PRESSURE_WINDOW_S
-
-
-async def amplify_cascade_failure(payload: str) -> None:
-    if get_svc_cfg()["downstream"].get("use_external_dependency", False):
-        return
-
-    _push_cascade_backlog(payload, chunk_mb=4)
-    _cascade_cpu_burn(0.25)
-    results = await asyncio.gather(
-        *(asyncio.to_thread(_hold_db_connection, 0.5) for _ in range(2)),
-        return_exceptions=True,
-    )
-    db_waits = [float(item) for item in results if not isinstance(item, Exception)]
-    if db_waits:
-        set_last_db_wait_ms(max(get_last_db_wait_ms(), max(db_waits)))
-
-
-# ---------------------------------------------------------------------------
-# Downstream call (for cascade_failure scenario)
-# ---------------------------------------------------------------------------
-async def call_downstream() -> dict:
-    global _downstream_cache
-    svc_cfg = get_svc_cfg()
-    downstream_cfg = svc_cfg["downstream"]
-    use_external = downstream_cfg.get("use_external_dependency", False)
-    url = (
-        downstream_cfg["external_dependency_url"]
-        if use_external
-        else downstream_cfg["payment_gateway_url"]
-    )
-    timeout = downstream_cfg["timeout_s"]
-    retry_attempts = max(1, int(downstream_cfg.get("retry_attempts", 1)))
-    retry_backoff_s = float(downstream_cfg.get("retry_backoff_s", 0.2))
-    cb_enabled = svc_cfg["circuit_breaker"]["enabled"]
-    cb_short_circuit_enabled = cb_enabled and not use_external
-    now = time.monotonic()
-
-    if cb_short_circuit_enabled and _circuit_open:
-        return {"status": "circuit_open", "skipped": True}
-
-    with _downstream_cache_lock:
-        cached = _downstream_cache
-        if cb_short_circuit_enabled and cached and cached[0] == url and now - cached[1] < 0.25:
-            return cached[2]
-
-    last_error: Exception | None = None
-    for attempt in range(1, retry_attempts + 1):
-        try:
-            client = _downstream_client
-            if client is None:
-                async with httpx.AsyncClient(timeout=timeout) as fallback_client:
-                    r = await fallback_client.get(url)
-            else:
-                r = await client.get(url, timeout=timeout)
-
-            if not r.is_success:
-                raise HTTPException(status_code=502, detail=f"Downstream returned status {r.status_code}")
-
-            _record_downstream_success()
-            result = {"status": r.status_code, "ok": True}
-            with _downstream_cache_lock:
-                _downstream_cache = (url, now, result)
-            return result
-        except Exception as e:
-            last_error = e
-            if attempt < retry_attempts:
-                await asyncio.sleep(min(retry_backoff_s * attempt, 1.0))
-
-    _record_downstream_failure()
-    with _downstream_cache_lock:
-        _downstream_cache = None
-
-    if isinstance(last_error, HTTPException):
-        detail = last_error.detail
-    else:
-        detail = str(last_error)
-    raise HTTPException(status_code=502, detail=f"Downstream failed after {retry_attempts} attempts: {detail}")
-
-
-# ---------------------------------------------------------------------------
-# Circuit breaker state
-# ---------------------------------------------------------------------------
-_circuit_open = False
-_failure_count = 0
-_last_failure_time = 0.0
-
-
-def _record_downstream_failure() -> None:
-    global _circuit_open, _failure_count, _last_failure_time
-    _failure_count += 1
-    _last_failure_time = time.monotonic()
-    svc_cfg = get_svc_cfg()
-    threshold = svc_cfg["circuit_breaker"]["failure_threshold"]
-    if svc_cfg["circuit_breaker"].get("enabled", True) and _failure_count >= threshold:
-        _circuit_open = True
-
-
-def _record_downstream_success() -> None:
-    global _circuit_open, _failure_count
-    _failure_count = 0
-    _circuit_open = False
-    _clear_cascade_backlog()
-
-
-async def _circuit_reset_task() -> None:
-    """Periodically try to half-open the circuit."""
-    while True:
-        await asyncio.sleep(5)
-        global _circuit_open, _failure_count
-        if _circuit_open:
-            svc_cfg = get_svc_cfg()
-            recovery = svc_cfg["circuit_breaker"].get("recovery_timeout_s", 30)
-            if time.monotonic() - _last_failure_time > recovery:
-                _circuit_open = False
-                _failure_count = 0
-
-
-def _db_probe_once() -> float:
-    cfg = get_db_cfg()
-    pool = get_db_pool()
-    if pool is None:
-        return 0.0
-
-    conn, wait_ms = _borrow_db_connection(float(cfg.get("connection_timeout_s", 5)))
-    if conn is None:
-        return 0.0
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT 1")
-        cur.fetchone()
-        time.sleep(0.35)
-        cur.close()
-    finally:
-        pool.putconn(conn)
-    return wait_ms
-
-
-async def _db_probe_task() -> None:
-    while True:
-        cfg = get_db_cfg()
-        max_pool_size = int(cfg.get("max_pool_size", 100))
-        if max_pool_size >= 100:
-            await asyncio.sleep(1)
-            continue
-
-        probe_width = min(max(max_pool_size + 6, 12), 20)
-        results = await asyncio.gather(
-            *(asyncio.to_thread(_db_probe_once) for _ in range(probe_width)),
-            return_exceptions=True,
-        )
-        waits = [float(item) for item in results if not isinstance(item, Exception)]
-        if waits:
-            set_last_db_wait_ms(max(waits))
-        await asyncio.sleep(1)
-
-
-async def _cache_maintenance_task() -> None:
-    while True:
-        cache_tick()
-        await asyncio.sleep(1)
-
-
-async def _cascade_pressure_task() -> None:
-    while True:
-        if _cascade_pressure_active():
-            _push_cascade_backlog(f"cascade:{os.getpid()}:{time.time()}", chunk_mb=6)
-            results = await asyncio.gather(
-                asyncio.to_thread(_cascade_cpu_burn, 0.45),
-                *(asyncio.to_thread(_hold_db_connection, 0.9) for _ in range(3)),
-                return_exceptions=True,
-            )
-            db_waits = [float(item) for item in results[1:] if not isinstance(item, Exception)]
-            if db_waits:
-                set_last_db_wait_ms(max(get_last_db_wait_ms(), max(db_waits)))
-        else:
-            if get_cascade_backlog_mb() > 0 and _failure_count == 0:
-                _clear_cascade_backlog()
-            await asyncio.sleep(0.5)
-
-
-async def _publish_metrics_snapshot_task() -> None:
-    while True:
         _write_worker_snapshot()
         await asyncio.sleep(1)
 
 
-# ---------------------------------------------------------------------------
-# App lifecycle
-# ---------------------------------------------------------------------------
+def reset_runtime_state() -> None:
+    global _circuit_open, _failure_count, _last_failure_time, _request_seq, _last_signature
+    with _metrics_lock:
+        _request_window.clear()
+        global _last_db_wait_ms, _last_request_duration_ms
+        _last_db_wait_ms = 0.0
+        _last_request_duration_ms = 0.0
+    _recent_downstream_results.clear()
+    _circuit_open = False
+    _failure_count = 0
+    _last_failure_time = 0.0
+    _request_seq = 0
+    _last_signature = "normal_noisy"
+    clear_memory_pressure()
+    ensure_cpu_burner(False)
+    reset_db_pool()
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global _downstream_client
