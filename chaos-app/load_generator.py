@@ -1,19 +1,16 @@
 """
 load_generator.py
 
-Sends continuous HTTP traffic to the chaos-app at a configurable rate.
-This is what makes the config changes observable — without load,
-a pool of 10 connections would not be exhausted.
-
-Usage:
-    python3 load_generator.py             # 50 req/s default
-    python3 load_generator.py --rps 20   # 20 req/s
+Sends paced HTTP traffic to the chaos-app at a configurable rate.
+The concurrency cap keeps the traffic pattern stable across long-latency
+signatures instead of letting unbounded in-flight tasks distort telemetry.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import statistics
 import time
 from collections import deque
@@ -24,6 +21,7 @@ import httpx
 # Config
 # ---------------------------------------------------------------------------
 DEFAULT_RPS = 50
+DEFAULT_MAX_INFLIGHT = 200
 PAYLOADS = [
     "order123",
     "payment456",
@@ -39,6 +37,7 @@ _latencies: deque[float] = deque(maxlen=500)
 _errors: deque[bool] = deque(maxlen=500)
 _total = 0
 _start = time.monotonic()
+_inflight = 0
 
 
 def print_stats() -> None:
@@ -54,15 +53,21 @@ def print_stats() -> None:
     err_pct = round(sum(errs) / len(errs) * 100, 1) if errs else 0.0
     print(
         f"[load-gen] {_total:>6} reqs | {rps:.1f} rps | "
-        f"p50={p50}ms p99={p99}ms | errors={err_pct}%"
+        f"p50={p50}ms p99={p99}ms | errors={err_pct}% | inflight={_inflight}"
     )
 
 
 # ---------------------------------------------------------------------------
 # Request coroutine
 # ---------------------------------------------------------------------------
-async def send_request(client: httpx.AsyncClient, app_url: str, payload: str) -> None:
-    global _total
+async def send_request(
+    client: httpx.AsyncClient,
+    app_url: str,
+    payload: str,
+    semaphore: asyncio.Semaphore,
+) -> None:
+    global _total, _inflight
+    _inflight += 1
     start = time.perf_counter()
     is_error = False
     try:
@@ -71,41 +76,59 @@ async def send_request(client: httpx.AsyncClient, app_url: str, payload: str) ->
             is_error = True
     except Exception:
         is_error = True
-    elapsed_ms = (time.perf_counter() - start) * 1000
-    _latencies.append(elapsed_ms)
-    _errors.append(is_error)
-    _total += 1
+    finally:
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        _latencies.append(elapsed_ms)
+        _errors.append(is_error)
+        _total += 1
+        _inflight -= 1
+        semaphore.release()
 
 
 # ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
-async def run(app_url: str, rps: int) -> None:
+async def run(app_url: str, rps: int, max_inflight: int) -> None:
     interval = 1.0 / rps
-    print(f"[load-gen] Sending {rps} req/s to {app_url}  (Ctrl+C to stop)")
+    print(
+        f"[load-gen] Sending {rps} req/s to {app_url} "
+        f"(max_inflight={max_inflight}, Ctrl+C to stop)"
+    )
 
+    semaphore = asyncio.Semaphore(max_inflight)
     async with httpx.AsyncClient() as client:
         req_idx = 0
         stats_at = time.monotonic() + 30
+        next_tick = time.monotonic()
         while True:
+            await semaphore.acquire()
             payload = f"{PAYLOADS[req_idx % len(PAYLOADS)]}_{req_idx}"
-            asyncio.create_task(send_request(client, app_url, payload))
+            asyncio.create_task(send_request(client, app_url, payload, semaphore))
             req_idx += 1
 
             if time.monotonic() >= stats_at:
                 print_stats()
                 stats_at = time.monotonic() + 30
 
-            await asyncio.sleep(interval)
+            next_tick += interval
+            sleep_for = next_tick - time.monotonic()
+            if sleep_for > 0:
+                await asyncio.sleep(sleep_for)
+            else:
+                next_tick = time.monotonic()
 
 
 def main() -> None:
-    import os
     parser = argparse.ArgumentParser(description="Chaos-app load generator")
     parser.add_argument("--rps", type=int, default=int(os.getenv("LOAD_RPS", str(DEFAULT_RPS))))
+    parser.add_argument(
+        "--max-inflight",
+        type=int,
+        default=int(os.getenv("MAX_INFLIGHT", str(DEFAULT_MAX_INFLIGHT))),
+    )
     parser.add_argument("--url", type=str, default=os.getenv("APP_URL", "http://localhost:8080"))
     args = parser.parse_args()
-    asyncio.run(run(args.url, args.rps))
+    asyncio.run(run(args.url, args.rps, args.max_inflight))
 
 
 if __name__ == "__main__":
