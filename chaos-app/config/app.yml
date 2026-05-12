@@ -15,4 +15,4 @@ cache:
 # CPU saturation scenario
 validation:
   enable_heavy_validation: false    # CHAOS_PARAM (cpu) — break: true, fix: false
-  regex_complexity: low    # CHAOS_PARAM (cpu) — break: high, fix: low
+  regex_complexity: low    # CHAOS_PARAM (cpu) — break: high, fix: lowj
