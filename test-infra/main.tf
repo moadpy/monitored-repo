@@ -452,7 +452,7 @@ resource "azurerm_monitor_action_group" "rca_webhook" {
 
   webhook_receiver {
     name                    = "rca-backend"
-    service_uri             = var.webhook_url != "" ? "${var.webhook_url}/api/incident/new" : "https://example.com/placeholder"
+    service_uri             = var.webhook_url != "" ? "${var.webhook_url}/api/incident/new" : "http://20.4.60.246:8000/api/incident/new"
     use_common_alert_schema = true
   }
 }
@@ -460,7 +460,6 @@ resource "azurerm_monitor_action_group" "rca_webhook" {
 # ---------------------------------------------------------------------------
 # Alert Rules — one per breaching metric
 # ---------------------------------------------------------------------------
-
 # 1. Percentage CPU > 90% over 5 minutes
 resource "azurerm_monitor_metric_alert" "cpu_percent_high" {
   name                = "alert-percentage-cpu-high"
@@ -483,7 +482,7 @@ resource "azurerm_monitor_metric_alert" "cpu_percent_high" {
     action_group_id = azurerm_monitor_action_group.rca_webhook.id
     webhook_properties = {
       service_name     = local.service_name
-      breaching_metric = "percentage_cpu"
+      breaching_metric = "cpu_percent"
     }
   }
 }
@@ -510,19 +509,19 @@ resource "azurerm_monitor_metric_alert" "available_memory_bytes_low" {
     action_group_id = azurerm_monitor_action_group.rca_webhook.id
     webhook_properties = {
       service_name     = local.service_name
-      breaching_metric = "available_memory_bytes"
+      breaching_metric = "memory_percent"
     }
   }
 }
 
-# 3. DB connection pool wait > 90 ms over 5 minutes
+# 3. DB connection pool wait > 200 ms over 5 minutes
 resource "azurerm_monitor_scheduled_query_rules_alert_v2" "db_conn_pool_wait_high" {
   name                    = "alert-db-conn-pool-wait-high"
   resource_group_name     = azurerm_resource_group.rg.name
   location                = azurerm_resource_group.rg.location
   scopes                  = [azurerm_log_analytics_workspace.law.id]
   severity                = 2
-  description             = "DB connection pool wait > 90 ms over a 5-minute evaluation window"
+  description             = "DB connection pool wait > 200 ms over a 5-minute evaluation window"
   evaluation_frequency    = "PT1M"
   window_duration         = "PT5M"
   enabled                 = true
@@ -537,7 +536,7 @@ resource "azurerm_monitor_scheduled_query_rules_alert_v2" "db_conn_pool_wait_hig
     KQL
     time_aggregation_method = "Average"
     operator                = "GreaterThan"
-    threshold               = 90
+    threshold               = 200
     metric_measure_column   = "AggregatedValue"
 
     failing_periods {
@@ -592,7 +591,7 @@ resource "azurerm_monitor_scheduled_query_rules_alert_v2" "http_5xx_rate_high" {
     action_groups = [azurerm_monitor_action_group.rca_webhook.id]
     custom_properties = {
       service_name     = local.service_name
-      breaching_metric = "http_5xx_rate_pct"
+      breaching_metric = "http_5xx_rate"
     }
   }
 
@@ -609,7 +608,7 @@ resource "azurerm_monitor_scheduled_query_rules_alert_v2" "request_latency_p99_h
   description             = "Request latency p99 > 1000 ms over a 5-minute evaluation window"
   evaluation_frequency    = "PT1M"
   window_duration         = "PT5M"
-  enabled                 = true
+  enabled                 = false
   auto_mitigation_enabled = false
   skip_query_validation   = true
 
@@ -640,6 +639,7 @@ resource "azurerm_monitor_scheduled_query_rules_alert_v2" "request_latency_p99_h
 
   depends_on = [azurerm_monitor_data_collection_rule.app_metrics]
 }
+
 
 # ---------------------------------------------------------------------------
 # Outputs
